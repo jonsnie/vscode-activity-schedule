@@ -1,0 +1,68 @@
+{
+  "name": "vscode-activity-agenda",
+  "displayName": "Agenda de Atividades",
+  "description": "Registre atividades realizadas no projeto e acompanhe tempo aberto e tempo digitando.",
+  "version": "0.0.2",
+  "publisher": "grupotbx",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:activityAgenda.quickAccess",
+    "onCommand:activityAgenda.openForm",
+    "onCommand:activityAgenda.resetTimers",
+    "onCommand:activityAgenda.exportEntries"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "activityAgenda.openForm",
+        "title": "Agenda de Atividades: Abrir formulário",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "activityAgenda.resetTimers",
+        "title": "Agenda de Atividades: Reiniciar contadores"
+      },
+      {
+        "command": "activityAgenda.exportEntries",
+        "title": "Agenda de Atividades: Exportar registros"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "activityAgenda",
+          "title": "Agenda de Atividades",
+          "icon": "resources/activity-agenda.svg"
+        }
+      ]
+    },
+    "views": {
+      "activityAgenda": [
+        {
+          "id": "activityAgenda.quickAccess",
+          "name": "Agenda"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "pnpm run package",
+    "compile": "tsc -p ./",
+    "package": "vsce package",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "pnpm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.5.2"
+  }
+}
