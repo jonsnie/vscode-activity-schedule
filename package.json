@@ -59,9 +59,8 @@
   "scripts": {
     "build": "pnpm run package",
     "compile": "tsc -p ./",
-    "package": "vsce package",
-    "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "pnpm run compile"
+    "package": "pnpm run compile && vsce package",
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/node": "^20.14.8",
