@@ -4,6 +4,10 @@
   "description": "Registre atividades realizadas no projeto e acompanhe tempo aberto e tempo digitando.",
   "version": "0.0.2",
   "publisher": "grupotbx",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonsnie/vscode-activity-schedule.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
