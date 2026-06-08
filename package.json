@@ -2,7 +2,7 @@
   "name": "vscode-activity-agenda",
   "displayName": "Agenda de Atividades",
   "description": "Registre atividades realizadas no projeto e acompanhe tempo aberto e tempo digitando.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "JonathanCanfieldSniecioski",
   "repository": {
     "type": "git",

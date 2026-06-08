@@ -15,6 +15,8 @@ type ActivityEntry = {
   taskDurationMs?: number;
   workspaceOpenMs: number;
   typingMs: number;
+  aiInterfaceOpenMs?: number;
+  aiTypingMs?: number;
 };
 
 type IssueContext = {
@@ -37,6 +39,10 @@ type TimerSnapshot = {
   totalOpenMs: number;
   openMsByDate: Record<string, number>;
   typingMs: number;
+  aiCurrentOpenMs: number;
+  aiTotalOpenMs: number;
+  aiTypingMs: number;
+  aiTotalMs: number;
   entries: ActivityEntry[];
   issueContext?: IssueContext;
   branchContext?: BranchContext;
@@ -46,6 +52,11 @@ type TimerSnapshot = {
 type OpenTimeState = {
   totalOpenMs: number;
   openMsByDate: Record<string, number>;
+};
+
+type AiTimeState = {
+  totalOpenMs: number;
+  typingMs: number;
 };
 
 class AgendaQuickAccessProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
@@ -75,6 +86,7 @@ class AgendaQuickAccessProvider implements vscode.TreeDataProvider<vscode.TreeIt
 const ENTRIES_KEY = 'activityAgenda.entries';
 const PROJECT_NAME_KEY = 'activityAgenda.projectName';
 const OPEN_TIME_KEY = 'activityAgenda.openTime';
+const AI_TIME_KEY = 'activityAgenda.aiTime';
 const IDLE_TYPING_LIMIT_MS = 5000;
 const execFileAsync = promisify(execFile);
 
@@ -84,6 +96,11 @@ let lastTypingAt: number | undefined;
 let lastOpenTimeAccountedAt = Date.now();
 let openTimeState: OpenTimeState = { totalOpenMs: 0, openMsByDate: {} };
 let lastOpenTimePersistedAt = 0;
+let aiTimeState: AiTimeState = { totalOpenMs: 0, typingMs: 0 };
+let aiInterfaceOpenedAt: number | undefined;
+let lastAiOpenTimeAccountedAt: number | undefined;
+let lastAiTypingAt: number | undefined;
+let lastAiTimePersistedAt = 0;
 let activeContext: vscode.ExtensionContext | undefined;
 let panel: vscode.WebviewPanel | undefined;
 let refreshTimer: NodeJS.Timeout | undefined;
@@ -93,6 +110,7 @@ let currentIssueContext: IssueContext | undefined;
 export function activate(context: vscode.ExtensionContext) {
   activeContext = context;
   openTimeState = getOpenTimeState(context);
+  aiTimeState = getAiTimeState(context);
   workspaceOpenedAt = Date.now();
   lastOpenTimeAccountedAt = workspaceOpenedAt;
 
@@ -123,6 +141,7 @@ export async function deactivate() {
   }
 
   await persistOpenTime();
+  await persistAiTime();
 }
 
 function registerTyping() {
@@ -136,9 +155,21 @@ function registerTyping() {
   lastTypingAt = now;
 }
 
+function registerAiTyping() {
+  const now = Date.now();
+
+  if (lastAiTypingAt !== undefined) {
+    const gap = now - lastAiTypingAt;
+    aiTimeState.typingMs += Math.min(gap, IDLE_TYPING_LIMIT_MS);
+  }
+
+  lastAiTypingAt = now;
+}
+
 function openForm(context: vscode.ExtensionContext) {
   if (panel) {
     panel.reveal(vscode.ViewColumn.One);
+    updateAiInterfaceVisibility();
     postSnapshot(context);
     refreshIssueContext(context);
     return;
@@ -152,6 +183,7 @@ function openForm(context: vscode.ExtensionContext) {
   );
 
   panel.webview.html = getWebviewHtml(panel.webview);
+  updateAiInterfaceVisibility();
 
   panel.webview.onDidReceiveMessage(async (message) => {
     if (message?.type === 'addEntry') {
@@ -177,9 +209,20 @@ function openForm(context: vscode.ExtensionContext) {
     if (message?.type === 'exportEntries') {
       await exportEntries(context);
     }
+
+    if (message?.type === 'aiTyping') {
+      registerAiTyping();
+      postSnapshot(context);
+    }
+  });
+
+  panel.onDidChangeViewState(() => {
+    updateAiInterfaceVisibility();
+    postSnapshot(context);
   });
 
   panel.onDidDispose(() => {
+    stopAiInterfaceTimer();
     panel = undefined;
     if (refreshTimer) {
       clearInterval(refreshTimer);
@@ -209,7 +252,9 @@ async function addEntry(context: vscode.ExtensionContext, description: string) {
     issueDescription: currentIssueContext?.issueDescription,
     createdAt: new Date().toISOString(),
     workspaceOpenMs: Date.now() - workspaceOpenedAt,
-    typingMs
+    typingMs,
+    aiInterfaceOpenMs: getCurrentAiOpenMs(),
+    aiTypingMs: aiTimeState.typingMs
   };
 
   await context.workspaceState.update(ENTRIES_KEY, [entry, ...entries]);
@@ -243,10 +288,16 @@ async function closeEntry(context: vscode.ExtensionContext, id: string) {
 
 async function resetTimers(context: vscode.ExtensionContext) {
   await persistOpenTime();
+  await persistAiTime();
   workspaceOpenedAt = Date.now();
   typingMs = 0;
   lastTypingAt = undefined;
   lastOpenTimeAccountedAt = workspaceOpenedAt;
+  aiTimeState = { totalOpenMs: 0, typingMs: 0 };
+  aiInterfaceOpenedAt = panel?.visible ? Date.now() : undefined;
+  lastAiOpenTimeAccountedAt = aiInterfaceOpenedAt;
+  lastAiTypingAt = undefined;
+  await saveAiTimeState();
   vscode.window.showInformationMessage('Contadores reiniciados.');
   postSnapshot(context);
 }
@@ -429,6 +480,8 @@ function postSnapshot(context: vscode.ExtensionContext) {
 function getSnapshot(context: vscode.ExtensionContext): TimerSnapshot {
   accrueOpenTime();
   persistOpenTimePeriodically();
+  accrueAiOpenTime();
+  persistAiTimePeriodically();
 
   return {
     projectName: getProjectName(context),
@@ -437,6 +490,10 @@ function getSnapshot(context: vscode.ExtensionContext): TimerSnapshot {
     totalOpenMs: openTimeState.totalOpenMs,
     openMsByDate: openTimeState.openMsByDate,
     typingMs,
+    aiCurrentOpenMs: getCurrentAiOpenMs(),
+    aiTotalOpenMs: aiTimeState.totalOpenMs,
+    aiTypingMs: aiTimeState.typingMs,
+    aiTotalMs: aiTimeState.totalOpenMs + aiTimeState.typingMs,
     entries: getEntries(context),
     issueContext: currentIssueContext,
     branchContext: currentBranchContext,
@@ -451,6 +508,87 @@ function getOpenTimeState(context: vscode.ExtensionContext): OpenTimeState {
     totalOpenMs: state?.totalOpenMs ?? 0,
     openMsByDate: state?.openMsByDate ?? {}
   };
+}
+
+function getAiTimeState(context: vscode.ExtensionContext): AiTimeState {
+  const state = context.workspaceState.get<AiTimeState>(AI_TIME_KEY);
+
+  return {
+    totalOpenMs: state?.totalOpenMs ?? 0,
+    typingMs: state?.typingMs ?? 0
+  };
+}
+
+function updateAiInterfaceVisibility() {
+  if (panel?.visible) {
+    startAiInterfaceTimer();
+    return;
+  }
+
+  stopAiInterfaceTimer();
+}
+
+function startAiInterfaceTimer() {
+  const now = Date.now();
+
+  if (aiInterfaceOpenedAt === undefined) {
+    aiInterfaceOpenedAt = now;
+  }
+
+  if (lastAiOpenTimeAccountedAt === undefined) {
+    lastAiOpenTimeAccountedAt = now;
+  }
+}
+
+function stopAiInterfaceTimer() {
+  accrueAiOpenTime();
+  aiInterfaceOpenedAt = undefined;
+  lastAiOpenTimeAccountedAt = undefined;
+  lastAiTypingAt = undefined;
+  void saveAiTimeState();
+}
+
+function accrueAiOpenTime() {
+  if (lastAiOpenTimeAccountedAt === undefined) {
+    return;
+  }
+
+  const now = Date.now();
+
+  if (now <= lastAiOpenTimeAccountedAt) {
+    return;
+  }
+
+  aiTimeState.totalOpenMs += now - lastAiOpenTimeAccountedAt;
+  lastAiOpenTimeAccountedAt = now;
+}
+
+function getCurrentAiOpenMs() {
+  return aiInterfaceOpenedAt === undefined ? 0 : Date.now() - aiInterfaceOpenedAt;
+}
+
+function persistAiTimePeriodically() {
+  const now = Date.now();
+
+  if (now - lastAiTimePersistedAt < 30000) {
+    return;
+  }
+
+  lastAiTimePersistedAt = now;
+  void saveAiTimeState();
+}
+
+async function persistAiTime() {
+  accrueAiOpenTime();
+  await saveAiTimeState();
+}
+
+async function saveAiTimeState() {
+  if (!activeContext) {
+    return;
+  }
+
+  await activeContext.workspaceState.update(AI_TIME_KEY, aiTimeState);
 }
 
 function accrueOpenTime() {
@@ -942,8 +1080,20 @@ function getWebviewHtml(webview: vscode.Webview) {
           <strong id="totalOpenTime">00:00:00</strong>
         </div>
         <div class="metric">
-          <span>Digitando</span>
+          <span>Digitando código</span>
           <strong id="typingTime">00:00:00</strong>
+        </div>
+        <div class="metric">
+          <span>IA aberta</span>
+          <strong id="aiCurrentOpenTime">00:00:00</strong>
+        </div>
+        <div class="metric">
+          <span>Digitando IA</span>
+          <strong id="aiTypingTime">00:00:00</strong>
+        </div>
+        <div class="metric">
+          <span>Total IA</span>
+          <strong id="aiTotalOpenTime">00:00:00</strong>
         </div>
       </section>
     </header>
@@ -994,6 +1144,9 @@ function getWebviewHtml(webview: vscode.Webview) {
     const todayOpenTime = document.getElementById('todayOpenTime');
     const totalOpenTime = document.getElementById('totalOpenTime');
     const typingTime = document.getElementById('typingTime');
+    const aiCurrentOpenTime = document.getElementById('aiCurrentOpenTime');
+    const aiTypingTime = document.getElementById('aiTypingTime');
+    const aiTotalOpenTime = document.getElementById('aiTotalOpenTime');
     const entries = document.getElementById('entries');
     const issueContext = document.getElementById('issueContext');
     const openTimeChart = document.getElementById('openTimeChart');
@@ -1004,6 +1157,7 @@ function getWebviewHtml(webview: vscode.Webview) {
 
     description.addEventListener('input', () => {
       userEditedDescription = true;
+      vscode.postMessage({ type: 'aiTyping' });
     });
 
     form.addEventListener('submit', (event) => {
@@ -1076,6 +1230,9 @@ function getWebviewHtml(webview: vscode.Webview) {
       todayOpenTime.textContent = formatDuration(snapshot.todayOpenMs);
       totalOpenTime.textContent = formatDuration(snapshot.totalOpenMs);
       typingTime.textContent = formatDuration(snapshot.typingMs);
+      aiCurrentOpenTime.textContent = formatDuration(snapshot.aiCurrentOpenMs);
+      aiTypingTime.textContent = formatDuration(snapshot.aiTypingMs);
+      aiTotalOpenTime.textContent = formatDuration(snapshot.aiTotalOpenMs);
       entries.innerHTML = '';
       renderIssueContext(snapshot);
       renderOpenTimeChart(snapshot.openMsByDate);
@@ -1124,8 +1281,16 @@ function getWebviewHtml(webview: vscode.Webview) {
         meta.className = 'entry-meta';
         const metaItems = [
           metaItem('Projeto aberto: ' + formatDuration(entry.workspaceOpenMs)),
-          metaItem('Digitando: ' + formatDuration(entry.typingMs))
+          metaItem('Digitando código: ' + formatDuration(entry.typingMs))
         ];
+
+        if (entry.aiInterfaceOpenMs !== undefined) {
+          metaItems.push(metaItem('IA aberta: ' + formatDuration(entry.aiInterfaceOpenMs)));
+        }
+
+        if (entry.aiTypingMs !== undefined) {
+          metaItems.push(metaItem('Digitando IA: ' + formatDuration(entry.aiTypingMs)));
+        }
 
         if (entry.issueNumber && entry.issueTitle) {
           metaItems.push(metaItem('Issue #' + entry.issueNumber + ': ' + entry.issueTitle));
